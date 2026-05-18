@@ -42,3 +42,5 @@ __pycache__/
 
 *.msi
 *.exe
+uploads/
+backend/uploads/
