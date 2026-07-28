@@ -8,9 +8,9 @@ symmetric_model = SentenceTransformer('all-MiniLM-L6-v2')
 asymmetric_model = SentenceTransformer('multi-qa-MiniLM-L6-cos-v1')
 
 
-# ═══════════════════════════════════════════════════════════════
-# SHARED HELPER — used by Layer 3 and Layer 4
-# ═══════════════════════════════════════════════════════════════
+
+# SHARED HELPER - used by Layer 3 and Layer 4------------------
+
 
 def chunk_text(text: str) -> list:
     """
@@ -67,9 +67,9 @@ def chunk_text(text: str) -> list:
 
     return bullets
 
-# ═══════════════════════════════════════════════════════════════
-# LAYER 2 — skill word vs skill word
-# ═══════════════════════════════════════════════════════════════
+
+# LAYER 2 - skill word vs skill word---------------------------
+
 
 def semantic_skill_match(
     resume_skills: list,
@@ -121,9 +121,9 @@ def semantic_skill_match(
     return matched_pairs, still_unmatched
 
 
-# ═══════════════════════════════════════════════════════════════
-# LAYER 3 — JD skill phrase vs resume experience/project sentences
-# ═══════════════════════════════════════════════════════════════
+
+# LAYER 3 - JD skill phrase vs resume experience/project sentences ----------
+
 
 def get_jd_requirement_sentences(jd_sections: dict) -> dict:
     """
@@ -233,40 +233,10 @@ def experience_match(
 
     return matched, still_missing
 
-# ═══════════════════════════════════════════════════════════════
-# LAYER 4 — Entire resume vs jd skills
-# ═══════════════════════════════════════════════════════════════
 
-# def chunk_full_text(text: str) -> list:
-#     """
-#     For Layer 4 — extracts ALL meaningful lines from the full resume,
-#     not just bullet points. This catches implied skills from skill lists,
-#     project titles, and other non-bullet content.
-#     """
-#     # strip artifacts
-#     text = re.sub(r'\(cid:\d+\)', ' ', text)
+# LAYER 4 - Entire resume vs jd skills---------------------
 
-#     lines = text.split('\n')
-#     chunks = []
 
-#     for line in lines:
-#         line = line.strip()
-#         line = re.sub(r'\s+', ' ', line).strip()
-
-#         # skip very short lines — names, dates, locations
-#         if len(line) < 15:
-#             continue
-
-#         # skip pure date lines
-#         if re.search(
-#             r'^\d{4}|^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)',
-#             line.lower()
-#         ):
-#             continue
-
-#         chunks.append(line)
-
-#     return chunks
 def chunk_full_text(text: str) -> list:
     text = re.sub(r'\(cid:\d+\)', ' ', text)
     lines = text.split('\n')
@@ -276,7 +246,7 @@ def chunk_full_text(text: str) -> list:
         line = line.strip()
         line = re.sub(r'\s+', ' ', line).strip()
 
-        if len(line) < 20:          # was 15 — cuts "technical skills" header
+        if len(line) < 20:          
             continue
 
         # skip contact/email lines
@@ -311,35 +281,14 @@ def full_context_match(
 
     # use entire resume text — not just experience/projects
     full_text = resume_sections.get("full", "")
-
-
-    # ── ADD THIS ─────────────────────────────────────────────
-    print(f"\nfull_text length: {len(full_text)}")
-    print(f"full_text preview: {full_text[:200]}")
-    # ─────────────────────────────────────────────────────────
+    
 
     if not full_text:
         return [], unmatched_jd_skills
 
     resume_chunks= chunk_full_text(full_text)
 
-    # ── ADD THIS ─────────────────────────────────────────────
-    print(f"bullets from full text: {len(resume_chunks)}")
-    for b in resume_chunks[:3]:
-        print(f"  • {b[:100]}")
-    
-    jd_sents = get_jd_requirement_sentences(jd_sections)
-    for skill in ["html", "css"]:
-        query = build_query(skill, jd_sents)
-        q_emb = asymmetric_model.encode(query, convert_to_tensor=True)
-        b_emb = asymmetric_model.encode(resume_chunks, convert_to_tensor=True)
-        scores = util.cos_sim(q_emb, b_emb)[0]
-        print(f"\n'{skill}' score: {scores.max().item():.3f}")
-        print(f"  query: {query}")
-        print(f"  bullet: {resume_chunks[scores.argmax().item()][:100]}")
-    # ─────────────────────────────────────────────────────────
-
-
+    ########################################################
     if not resume_chunks:
         return [], unmatched_jd_skills
 
@@ -374,12 +323,7 @@ def full_context_match(
             chunk_emb = symmetric_model.encode(chunk, convert_to_tensor=True)
             name_sim  = util.cos_sim(skill_embeddings[idx], chunk_emb).item()
 
-            # ─────────────────────────────────────────
-
-            if jd_skill == "html":
-                print(f"  html top chunk | score:{score:.3f} name_sim:{name_sim:.3f} | {chunk[:80]}")
-            # ─────────────────────────────────────────
-
+           
             if name_sim >= 0.10 and score > best_score:
                 best_score = score
                 best_chunk = chunk
