@@ -1,5 +1,5 @@
 # auth.py
-
+import os
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -9,7 +9,7 @@ from fastapi.security import OAuth2PasswordBearer
 # -- Config --------------------------------------------
 # SECRET_KEY signs the JWT — change this to a long random string in production
 # generate one with: python -c "import secrets; print(secrets.token_hex(32))"
-SECRET_KEY  = "your-secret-key-change-this-in-production"
+SECRET_KEY  = "SECRET_KEY"
 ALGORITHM   = "HS256"
 TOKEN_EXPIRE_HOURS = 24   # token valid for 24 hours
 

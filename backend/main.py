@@ -10,8 +10,12 @@ import os
 from matcher import semantic_skill_match, experience_match, get_jd_requirement_sentences, chunk_text, full_context_match
 import json
 from pydantic import BaseModel
-from auth import hash_password, verify_password, create_token, get_current_user
 import github_analyzer
+from dotenv import load_dotenv
+
+load_dotenv()
+
+from auth import hash_password, verify_password, create_token, get_current_user
 
 
 app = FastAPI()
@@ -24,10 +28,10 @@ app.add_middleware(
 )
 
 conn = psycopg2.connect(
-    host="localhost",
-    database="devlens",
-    user="postgres",
-    password="Snigdha@2006"
+    host=os.environ["DB_HOST"],
+    database=os.environ["DB_NAME"],
+    user=os.environ["DB_USER"],
+    password=os.environ["DB_PASSWORD"]
 )
 cur = conn.cursor()
 
@@ -277,14 +281,18 @@ async def link_github(req: GithubLinkRequest, user = Depends(get_current_user)):
     username = req.username.strip().lstrip("@")
     if not username:
         raise HTTPException(status_code=400, detail="Username required")
- 
-    if not github_analyzer.verify_github_user(username):
-        raise HTTPException(status_code=404, detail="GitHub account not found")
- 
-    profile = github_analyzer.build_profile(username)
+
+    try:
+        if not github_analyzer.verify_github_user(username):
+            raise HTTPException(status_code=404, detail="GitHub account not found")
+
+        profile = github_analyzer.build_profile(username)
+    except github_analyzer.GithubRateLimitError as e:
+        raise HTTPException(status_code=429, detail=str(e))
+
     if not profile:
         raise HTTPException(status_code=404, detail="GitHub account not found")
- 
+
     profile_id = _save_github_profile(user["user_id"], profile)
  
     return {

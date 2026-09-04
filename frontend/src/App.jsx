@@ -257,6 +257,11 @@ function StudentView({ authUser, onLogout }) {
   const [selectedJdId,setSelectedJdId]=useState(null)
   const [uploading,setUploading]=useState({resume:false,jd:false})
   const [error,setError]=useState("")
+  const [githubUsername,setGithubUsername]=useState("")
+  const [githubHint,setGithubHint]=useState("")
+  const [githubLinking,setGithubLinking]=useState(false)
+  const [githubProfile,setGithubProfile]=useState(null)
+  const [githubError,setGithubError]=useState("")
 
   const authFetch=(url,opts={})=>fetch(url,{
     ...opts,headers:{...opts.headers,Authorization:`Bearer ${authUser.token}`}
@@ -270,9 +275,36 @@ function StudentView({ authUser, onLogout }) {
       const res=await authFetch("http://127.0.0.1:8000/upload-resume",{method:"POST",body:form})
       const data=await res.json()
       setResumeSkills(data.skills||[]);setResumeId(data["resume id"]);setResumeName(resumeFile.name)
+    if(data.github_hint&&!githubProfile){
+        setGithubHint(data.github_hint);setGithubUsername(data.github_hint)
+      }
     }catch{setError("Resume upload failed. Is the backend running?")}
     finally{setUploading(u=>({...u,resume:false}))}
   }
+
+  const handleLinkGithub=async()=>{
+    const uname=githubUsername.trim().replace(/^@/,"")
+    if(!uname){setGithubError("Enter a GitHub username first");return}
+    setGithubError("");setGithubLinking(true)
+    try{
+      const res=await authFetch("http://127.0.0.1:8000/github/link",{
+        method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({username:uname})
+      })
+      if(!res.ok){
+        const body=await res.json().catch(()=>({}))
+        setGithubError(res.status===404?"GitHub account not found":(body.detail||"Could not link GitHub account"))
+        return
+      }
+      setGithubProfile(await res.json())
+    }catch{setGithubError("GitHub link failed. Check the backend.")}
+    finally{setGithubLinking(false)}
+  } 
+  const handleUnlinkGithub=()=>{
+  setGithubProfile(null);setGithubUsername("");setGithubHint("");setGithubError("")
+}  
+    
+  
 
   const handleJDUpload=async()=>{
     if(!jdFile||!title||!company){setError("Fill in title, company, and select a JD PDF");return}
@@ -388,6 +420,72 @@ function StudentView({ authUser, onLogout }) {
           )}
         </div>
 
+        {/* Step 1.5 — GitHub */}
+<div style={{background:C.surface,border:`1px solid ${C.border}`,
+             borderRadius:"12px",padding:"20px",marginBottom:"12px"}}>
+  <div style={{fontSize:"10px",fontFamily:T.mono,color:C.textMut,
+               letterSpacing:"0.1em",marginBottom:"14px"}}>
+    {"01.5 — GITHUB "}<span style={{color:C.textMut,letterSpacing:"normal"}}>(optional)</span>
+  </div>
+
+  {!githubProfile?(
+    <>
+      {githubHint&&(
+        <div style={{fontSize:"12px",color:C.accentText,marginBottom:"10px"}}>
+          Detected <span style={{fontFamily:T.mono}}>@{githubHint}</span> on your resume —
+          confirm below to pull in your repo evidence.
+        </div>
+      )}
+      <div style={{display:"flex",gap:"8px"}}>
+        <input placeholder="github username" value={githubUsername}
+               onChange={e=>{setGithubUsername(e.target.value);setGithubError("")}}
+               onKeyDown={e=>e.key==="Enter"&&handleLinkGithub()}
+               style={{...inputStyle,flex:1}}/>
+        <button onClick={handleLinkGithub} disabled={githubLinking}
+                style={{...btnStyle(true),opacity:githubLinking?0.6:1,whiteSpace:"nowrap"}}>
+          {githubLinking?"Linking...":"Link"}
+        </button>
+      </div>
+      {githubError&&(
+        <div style={{fontSize:"12px",color:C.red,marginTop:"8px"}}>{githubError}</div>
+      )}
+    </>
+  ):(
+    <div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div style={{display:"flex",alignItems:"center",gap:"8px"}}>
+          <span style={{color:C.green,fontSize:"16px"}}>✓</span>
+          <span style={{fontFamily:T.mono,fontSize:"13px",color:C.textPri}}>
+            @{githubProfile.username}
+          </span>
+          <span style={{fontSize:"11px",color:C.textMut}}>
+            {githubProfile.repo_count} repos · {githubProfile.skill_count} skills found
+          </span>
+        </div>
+        <button onClick={handleUnlinkGithub}
+                style={{background:"none",border:"none",color:C.textMut,
+                        fontSize:"11px",fontFamily:T.mono,cursor:"pointer",
+                        textDecoration:"underline"}}>
+          change
+        </button>
+      </div>
+      {githubProfile.summary&&(
+        <p style={{fontSize:"12px",color:C.textSec,margin:"8px 0 0",lineHeight:"1.5"}}>
+          {githubProfile.summary}
+        </p>
+      )}
+      {githubProfile.top_languages?.length>0&&(
+  <div style={{display:"flex",flexWrap:"wrap",gap:"4px",marginTop:"10px"}}>
+    {githubProfile.top_languages.map(l=>
+      <Tag key={l.name} label={`${l.name} ${l.pct}%`} variant="indigo"/>
+    )}
+  </div>
+)}
+    </div>
+  )}
+</div>
+
+
         {/* Step 2 — JDs */}
         <div style={{background:C.surface,border:`1px solid ${C.border}`,
                      borderRadius:"12px",padding:"20px",marginBottom:"12px"}}>
@@ -490,8 +588,8 @@ function StudentView({ authUser, onLogout }) {
       </div>
     </div>
   )
-}
 
+}
 export default function App() {
   const [authUser,setAuthUser]=useState(()=>{
     const token=localStorage.getItem("token")

@@ -1,5 +1,3 @@
-
-
 import base64
 import json
 import os
@@ -23,6 +21,29 @@ if _TOKEN:
 
 MAX_REPOS_SCANNED = 15          # cap to stay inside rate limits / keep it fast
 MAX_FILE_BYTES = 60_000         # skip huge dependency/config files
+
+
+class GithubRateLimitError(Exception):
+    """Raised when GitHub's API returns a rate-limit response, so callers
+    can surface a clear 429 instead of misreading it as 'not found' or
+    silently returning empty results."""
+    pass
+
+
+def _github_get(url: str, **kwargs):
+    """Wrapper around requests.get that raises GithubRateLimitError on
+    rate-limit responses. All GitHub API calls in this module should go
+    through this instead of calling requests.get directly."""
+    timeout = kwargs.pop("timeout", 10)
+    r = requests.get(url, headers=_HEADERS, timeout=timeout, **kwargs)
+    if r.status_code == 429 or (
+        r.status_code == 403 and r.headers.get("X-RateLimit-Remaining") == "0"
+    ):
+        raise GithubRateLimitError(
+            "GitHub API rate limit exceeded. Set GITHUB_TOKEN to raise the limit."
+        )
+    return r
+
 
 # -- Reverse skill-alias lookup (built once) -----------------------
 
@@ -69,8 +90,9 @@ def match_to_canonical_skill(raw_token: str) -> str | None:
 
 def verify_github_user(username: str) -> dict | None:
     """Confirm a GitHub username exists. Returns the public profile dict
-    (name, bio, public_repos, followers...) or None if it doesn't exist."""
-    r = requests.get(f"{GITHUB_API}/users/{username}", headers=_HEADERS, timeout=10)
+    (name, bio, public_repos, followers...) or None if it doesn't exist.
+    Raises GithubRateLimitError if GitHub's API is rate-limited."""
+    r = _github_get(f"{GITHUB_API}/users/{username}")
     if r.status_code != 200:
         return None
     return r.json()
@@ -94,9 +116,9 @@ def extract_github_username_from_text(resume_text: str) -> str | None:
 
 
 def _get_repos(username: str) -> list:
-    r = requests.get(
+    """Raises GithubRateLimitError if GitHub's API is rate-limited."""
+    r = _github_get(
         f"{GITHUB_API}/users/{username}/repos",
-        headers=_HEADERS,
         params={"per_page": 100, "sort": "updated", "type": "owner"},
         timeout=15,
     )
@@ -109,15 +131,16 @@ def _get_repos(username: str) -> list:
 
 
 def _get_languages(username: str, repo_name: str) -> dict:
-    r = requests.get(f"{GITHUB_API}/repos/{username}/{repo_name}/languages", headers=_HEADERS, timeout=10)
+    """Raises GithubRateLimitError if GitHub's API is rate-limited."""
+    r = _github_get(f"{GITHUB_API}/repos/{username}/{repo_name}/languages")
     return r.json() if r.status_code == 200 else {}
 
 
 def _get_repo_tree(username: str, repo_name: str, default_branch: str) -> list:
-    """Full recursive file listing for a repo via the git trees API."""
-    r = requests.get(
+    """Full recursive file listing for a repo via the git trees API.
+    Raises GithubRateLimitError if GitHub's API is rate-limited."""
+    r = _github_get(
         f"{GITHUB_API}/repos/{username}/{repo_name}/git/trees/{default_branch}",
-        headers=_HEADERS,
         params={"recursive": "1"},
         timeout=15,
     )
@@ -127,11 +150,8 @@ def _get_repo_tree(username: str, repo_name: str, default_branch: str) -> list:
 
 
 def _get_file_content(username: str, repo_name: str, path: str) -> str | None:
-    r = requests.get(
-        f"{GITHUB_API}/repos/{username}/{repo_name}/contents/{path}",
-        headers=_HEADERS,
-        timeout=10,
-    )
+    """Raises GithubRateLimitError if GitHub's API is rate-limited."""
+    r = _github_get(f"{GITHUB_API}/repos/{username}/{repo_name}/contents/{path}")
     if r.status_code != 200:
         return None
     data = r.json()
@@ -274,7 +294,8 @@ def _scan_repo_files(username: str, repo_name: str, file_paths: list) -> tuple[l
 
 
 def _get_readme_text(username: str, repo_name: str) -> str:
-    r = requests.get(f"{GITHUB_API}/repos/{username}/{repo_name}/readme", headers=_HEADERS, timeout=10)
+    """Raises GithubRateLimitError if GitHub's API is rate-limited."""
+    r = _github_get(f"{GITHUB_API}/repos/{username}/{repo_name}/readme")
     if r.status_code != 200:
         return ""
     data = r.json()
@@ -339,7 +360,10 @@ def _tier_for_sources(sources: set) -> str:
 
 def build_profile(username: str) -> dict:
     """Full pipeline: verify -> fetch repos -> analyze each -> aggregate.
-    Returns everything needed to populate github_profiles + github_skills."""
+    Returns everything needed to populate github_profiles + github_skills.
+    Raises GithubRateLimitError if GitHub's API is rate-limited partway
+    through — callers should surface that as a 429, not treat a partial
+    profile as complete."""
     user = verify_github_user(username)
     if not user:
         return None
