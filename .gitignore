@@ -44,3 +44,4 @@ __pycache__/
 *.exe
 uploads/
 backend/uploads/
+backend/previous.py

@@ -11,6 +11,8 @@ from matcher import semantic_skill_match, experience_match, get_jd_requirement_s
 import json
 from pydantic import BaseModel
 from auth import hash_password, verify_password, create_token, get_current_user
+import github_analyzer
+
 
 app = FastAPI()
 
@@ -43,6 +45,9 @@ class BatchMatchRequest(BaseModel):
 class RecruiterMatchRequest(BaseModel):
     jd_id:      int
     resume_ids: list[int]
+
+class GithubLinkRequest(BaseModel):
+    username: str
 
 # -- Shared helpers ---------------------------------------
 
@@ -150,7 +155,7 @@ async def login(req: RegisterRequest):
         "token_type":   "bearer",
         "user_id":      user_id,
         "email":        req.email,
-        "role":         role           # return role
+        "role":         role           
     }
 
 @app.get("/me")
@@ -186,7 +191,14 @@ async def upload_file(file: UploadFile = File(...), user = Depends(get_current_u
         cur.execute("INSERT INTO resume_skills(resume_id, skill) VALUES(%s,%s)", (resume_id, skill))
 
     conn.commit()
-    return {"resume id": resume_id, "filename": file.filename, "skills": matched_skills}
+
+    github_hint = github_analyzer.extract_github_username_from_text(raw_text)
+
+    return {"resume id": resume_id, 
+            "filename": file.filename, 
+            "skills": matched_skills,
+            "github_hint": github_hint
+            }
 
 # -- JD upload ----------------------------------------------
 
@@ -224,6 +236,119 @@ async def add_jd(
 
     conn.commit()
     return {"message": "JD stored successfully", "jd_id": jd_id, "skills": matched_skills}
+
+
+# -- GitHub evidence layer -----------------------------------
+ 
+def _save_github_profile(user_id: int, profile: dict) -> int:
+    """Replaces any existing GitHub profile for this user with a fresh
+    analysis (and its skill rows)."""
+    cur.execute("SELECT id FROM github_profiles WHERE user_id = %s", (user_id,))
+    old = cur.fetchone()
+    if old:
+        cur.execute("DELETE FROM github_skills WHERE profile_id = %s", (old[0],))
+        cur.execute("DELETE FROM github_profiles WHERE id = %s", (old[0],))
+ 
+    cur.execute(
+        """
+        INSERT INTO github_profiles (user_id, username, summary, top_languages, repo_count, top_repos)
+        VALUES (%s,%s,%s,%s,%s,%s) RETURNING id
+        """,
+        (
+            user_id, profile["username"], profile["summary"],
+            json.dumps(profile["top_languages"]), profile["repo_count"],
+            json.dumps(profile["top_repos"])
+        )
+    )
+    profile_id = cur.fetchone()[0]
+ 
+    for row in profile["skills"]:
+        cur.execute(
+            "INSERT INTO github_skills (profile_id, skill, source, repo, tier) VALUES (%s,%s,%s,%s,%s)",
+            (profile_id, row["skill"], row["source"], row["repo"], row["tier"])
+        )
+ 
+    conn.commit()
+    return profile_id
+ 
+ 
+@app.post("/github/link")
+async def link_github(req: GithubLinkRequest, user = Depends(get_current_user)):
+    username = req.username.strip().lstrip("@")
+    if not username:
+        raise HTTPException(status_code=400, detail="Username required")
+ 
+    if not github_analyzer.verify_github_user(username):
+        raise HTTPException(status_code=404, detail="GitHub account not found")
+ 
+    profile = github_analyzer.build_profile(username)
+    if not profile:
+        raise HTTPException(status_code=404, detail="GitHub account not found")
+ 
+    profile_id = _save_github_profile(user["user_id"], profile)
+ 
+    return {
+        "profile_id":    profile_id,
+        "username":      profile["username"],
+        "summary":       profile["summary"],
+        "top_languages": profile["top_languages"],
+        "repo_count":    profile["repo_count"],
+        "top_repos":     profile["top_repos"],
+        "skill_count":   len(profile["skills"])
+    }
+ 
+ 
+@app.get("/github/profile")
+async def get_github_profile(user = Depends(get_current_user)):
+    cur.execute(
+        """
+        SELECT id, username, analyzed_at, summary, top_languages, repo_count, top_repos
+        FROM github_profiles WHERE user_id = %s
+        """,
+        (user["user_id"],)
+    )
+    row = cur.fetchone()
+    if not row:
+        return {"linked": False}
+ 
+    profile_id = row[0]
+    cur.execute(
+        "SELECT skill, source, repo, tier FROM github_skills WHERE profile_id = %s",
+        (profile_id,)
+    )
+    skill_rows = cur.fetchall()
+ 
+    skills_by_tier = {"implemented": [], "declared": []}
+    for skill, source, repo, tier in skill_rows:
+        skills_by_tier.setdefault(tier, []).append({"skill": skill, "source": source, "repo": repo})
+ 
+    return {
+        "linked":        True,
+        "username":      row[1],
+        "analyzed_at":   row[2].isoformat() if row[2] else None,
+        "summary":       row[3],
+        "top_languages": row[4],
+        "repo_count":    row[5],
+        "top_repos":     row[6],
+        "skills":        skills_by_tier
+    }
+ 
+ 
+def get_github_implemented_skills(user_id: int) -> set:
+    """Canonical skills this user has 'implemented'-tier GitHub evidence for.
+    Used to enrich match results with GitHub-verified gaps."""
+    cur.execute(
+        """
+        SELECT DISTINCT gs.skill
+        FROM github_skills gs
+        JOIN github_profiles gp ON gs.profile_id = gp.id
+        WHERE gp.user_id = %s AND gs.tier = 'implemented'
+        """,
+        (user_id,)
+    )
+    return {row[0] for row in cur.fetchall()}
+ 
+ 
 
 # -- Core matching logic ------------------------------------
 async def run_match(resume_id: int, jd_id: int) -> dict:
@@ -265,13 +390,22 @@ async def run_match(resume_id: int, jd_id: int) -> dict:
         unmatched_jd_skills=unmatched_l3,
     )
 
+    # -- GitHub evidence cross-check -----------------------------------
+    
+    cur.execute("SELECT user_id FROM resumes WHERE id = %s", (resume_id,))
+    resume_owner = cur.fetchone()
+    github_implemented = get_github_implemented_skills(resume_owner[0]) if resume_owner else set()
+ 
+    github_verified_gaps = [s for s in missing_skills if s in github_implemented]
+    true_missing_skills  = [s for s in missing_skills if s not in github_implemented]
+ 
     total = len(jd_skills) or 1
-
+ 
     exact_score    = round(len(exact_matched)    / total * 100, 2)
     semantic_score = round(len(semantic_matches) / total * 100, 2)
     exp_score      = round(len(exp_matches)      / total * 100, 2)
     ctx_score      = round(len(ctx_matches)      / total * 100, 2)
-
+ 
     weighted_matched = (
         len(exact_matched)    * 1.00 +
         len(semantic_matches) * 0.90 +
@@ -287,7 +421,7 @@ async def run_match(resume_id: int, jd_id: int) -> dict:
         len(exact_matched) + len(semantic_matches) +
         len(exp_matches)   + len(ctx_matches)
     )
-
+ 
     try:
         cur.execute(
             """
@@ -314,7 +448,7 @@ async def run_match(resume_id: int, jd_id: int) -> dict:
     except Exception as e:
         print(f"match_results INSERT failed: {e}")
         conn.rollback()
-
+ 
     return {
         "resume_id":          resume_id,
         "jd_id":              jd_id,
@@ -329,6 +463,8 @@ async def run_match(resume_id: int, jd_id: int) -> dict:
         "experience_matches": exp_matches,
         "context_matches":    ctx_matches,
         "missing_skills":     missing_skills,
+        "github_verified_gaps": github_verified_gaps,
+        "true_missing_skills":  true_missing_skills,
         "extra_skills":       list(extra_skills),
         "jd_skill_count":     len(jd_skills),
         "total_matched":      total_matched
@@ -534,7 +670,7 @@ async def get_resume_results(resume_id: int, user = Depends(get_current_user)):
         WHERE mr.resume_id = %s
         ORDER BY mr.final_score DESC
         """,
-        (resume_id,)        # fixed — removed stray quote in SQL
+        (resume_id,)        
     )
     rows = cur.fetchall()
 
